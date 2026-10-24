@@ -1,6 +1,9 @@
 package com.example.secureauth.ui
 
 import android.app.Activity
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CreatePasswordRequest
 import androidx.credentials.CredentialManager
@@ -8,111 +11,108 @@ import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.GetPasswordOption
 import androidx.credentials.PasswordCredential
+import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.secureauth.data.AuthRepository
+import com.example.secureauth.R
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
-import kotlinx.coroutines.flow.MutableStateFlow
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.auth.GoogleAuthProvider
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 
-class AuthViewModel(
-    private val repository: AuthRepository = AuthRepository()
-) : ViewModel() {
-    private val _busy = MutableStateFlow(false)
-    val busy: StateFlow<Boolean> = _busy.asStateFlow()
-    private val _message = MutableStateFlow<String?>(null)
-    val message: StateFlow<String?> = _message.asStateFlow()
+class AuthViewModel : ViewModel() {
+    private val auth = FirebaseAuth.getInstance()
 
-    fun clearMessage() { _message.value = null }
+    // Текущий пользователь (null = не вошли). Меняется при входе, выходе и отзыве сессии.
+    val user: StateFlow<FirebaseUser?> = callbackFlow {
+        val listener = FirebaseAuth.AuthStateListener { trySend(it.currentUser) }
+        auth.addAuthStateListener(listener)
+        awaitClose { auth.removeAuthStateListener(listener) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, auth.currentUser)
 
-    fun register(email: String, password: String, activity: Activity) {
-        runAuth {
-            repository.register(email, password)
-            try {
-                CredentialManager.create(activity).createCredential(
-                    context = activity,
-                    request = CreatePasswordRequest(email.trim(), password)
-                )
-                _message.value = "Регистрация успешна. Пароль сохранён."
-            } catch (_: Exception) {
-                _message.value = "Регистрация успешна."
-            }
+    var busy by mutableStateOf(false)
+        private set
+    var message by mutableStateOf<String?>(null)
+        private set
+
+    fun register(email: String, password: String, activity: Activity) = launchAuth {
+        auth.createUserWithEmailAndPassword(email.trim(), password).await()
+        runCatching {
+            CredentialManager.create(activity)
+                .createCredential(activity, CreatePasswordRequest(email.trim(), password))
         }
     }
 
-    fun login(email: String, password: String) {
-        runAuth {
-            repository.login(email, password)
-            _message.value = null
-        }
+    fun login(email: String, password: String) = launchAuth {
+        auth.signInWithEmailAndPassword(email.trim(), password).await()
     }
 
-    fun loginWithCredentialManager(activity: Activity) {
-        runAuth {
-            val manager = CredentialManager.create(activity)
-            val googleOption = GetGoogleIdOption.Builder()
-                .setServerClientId(activity.getString(com.example.secureauth.R.string.default_web_client_id))
-                .setFilterByAuthorizedAccounts(false)
-                .setAutoSelectEnabled(false)
-                .build()
-            val request = GetCredentialRequest.Builder()
-                .addCredentialOption(GetPasswordOption())
-                .addCredentialOption(googleOption)
-                .build()
-            val result = manager.getCredential(activity, request)
+    fun loginWithCredentialManager(activity: Activity) = launchAuth {
+        val googleOption = GetGoogleIdOption.Builder()
+            .setServerClientId(activity.getString(R.string.default_web_client_id))
+            .setFilterByAuthorizedAccounts(false)
+            .build()
+        val request = GetCredentialRequest.Builder()
+            .addCredentialOption(GetPasswordOption())
+            .addCredentialOption(googleOption)
+            .build()
+        val credential = CredentialManager.create(activity).getCredential(activity, request).credential
 
-            when (val credential = result.credential) {
-                is PasswordCredential -> repository.login(credential.id, credential.password)
-                is CustomCredential -> {
-                    if (credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                        val googleCredential = GoogleIdTokenCredential.createFrom(credential.data)
-                        repository.loginWithGoogle(googleCredential.idToken)
-                    } else error("Выбран неподдерживаемый тип учётных данных")
-                }
-                else -> error("Не удалось определить учётные данные")
+        when {
+            credential is PasswordCredential ->
+                auth.signInWithEmailAndPassword(credential.id, credential.password).await()
+
+            credential is CustomCredential &&
+                    credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL -> {
+
+                val idToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
+                auth.signInWithCredential(GoogleAuthProvider.getCredential(idToken, null)).await()
             }
-            _message.value = null
+
+            else -> error("Выбран неподдерживаемый тип учётных данных")
         }
     }
 
     fun signOut(activity: Activity) {
         viewModelScope.launch {
-            try {
-                CredentialManager.create(activity).clearCredentialState(ClearCredentialStateRequest())
-            } catch (_: Exception) {
-                // Выход из Firebase выполняется и при ошибке очистки Credential Manager.
-            }
-            repository.signOut()
+            runCatching { CredentialManager.create(activity).clearCredentialState(ClearCredentialStateRequest()) }
+            auth.signOut()
+            message = null
         }
     }
 
-    private fun runAuth(action: suspend () -> Unit) {
-        if (_busy.value) return
+    private fun launchAuth(action: suspend () -> Unit) {
+        if (busy) return
         viewModelScope.launch {
-            _busy.value = true
-            _message.value = null
+            busy = true
+            message = null
             try {
                 action()
-            } catch (error: Exception) {
-                _message.value = friendlyError(error)
+            } catch (_: GetCredentialCancellationException) {
+            } catch (e: Exception) {
+                message = friendlyError(e)
             } finally {
-                _busy.value = false
+                busy = false
             }
         }
     }
 
-    private fun friendlyError(error: Throwable): String {
-        val text = error.message.orEmpty()
+    private fun friendlyError(e: Exception): String {
+        val text = e.message.orEmpty()
         return when {
             text.contains("already in use", true) -> "Этот email уже зарегистрирован."
             text.contains("badly formatted", true) -> "Проверьте формат email."
-            text.contains("password is invalid", true) ||
-                text.contains("invalid credential", true) -> "Неверный email или пароль."
+            text.contains("incorrect", true) || text.contains("invalid", true) -> "Неверный email или пароль."
             text.contains("network", true) -> "Проверьте подключение к интернету."
-            else -> error.localizedMessage ?: "Произошла ошибка."
+            else -> e.localizedMessage ?: "Произошла ошибка."
         }
     }
 }

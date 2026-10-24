@@ -1,44 +1,56 @@
 package com.example.secureauth.ui
 
 import android.app.Activity
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.flow.StateFlow
 
 @Composable
 fun AuthScreen(activity: Activity, viewModel: AuthViewModel) {
     var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") } // только в памяти, никуда не сохраняется
     var isRegister by remember { mutableStateOf(false) }
-    val busy by viewModel.busy.collectAsState()
-    val message by viewModel.message.collectAsState()
-    val valid = email.contains("@") && password.length >= 6
+    val busy = viewModel.busy
+    val canSubmit = email.contains("@") && password.length >= 6 && !busy
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically)
     ) {
         Text(if (isRegister) "Регистрация" else "Вход", style = MaterialTheme.typography.headlineMedium)
-        Spacer(Modifier.height(24.dp))
+
         OutlinedTextField(
             value = email,
-            onValueChange = { email = it; viewModel.clearMessage() },
+            onValueChange = { email = it },
             label = { Text("Email") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
             enabled = !busy,
             modifier = Modifier.fillMaxWidth()
         )
-        Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = password,
-            onValueChange = { password = it; viewModel.clearMessage() },
+            onValueChange = { password = it },
             label = { Text("Пароль (минимум 6 символов)") },
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
@@ -46,13 +58,13 @@ fun AuthScreen(activity: Activity, viewModel: AuthViewModel) {
             enabled = !busy,
             modifier = Modifier.fillMaxWidth()
         )
-        Spacer(Modifier.height(16.dp))
+
         Button(
             onClick = {
                 if (isRegister) viewModel.register(email, password, activity)
                 else viewModel.login(email, password)
             },
-            enabled = valid && !busy,
+            enabled = canSubmit,
             modifier = Modifier.fillMaxWidth()
         ) { Text(if (isRegister) "Зарегистрироваться" else "Войти") }
 
@@ -63,19 +75,12 @@ fun AuthScreen(activity: Activity, viewModel: AuthViewModel) {
         ) { Text("Войти через Google или сохранённый пароль") }
 
         TextButton(
-            onClick = { isRegister = !isRegister; viewModel.clearMessage() },
+            onClick = { isRegister = !isRegister },
             enabled = !busy,
             modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(if (isRegister) "Уже есть аккаунт? Войти" else "Нет аккаунта? Зарегистрироваться")
-        }
-        if (busy) {
-            Spacer(Modifier.height(12.dp))
-            CircularProgressIndicator()
-        }
-        if (message != null) {
-            Spacer(Modifier.height(12.dp))
-            Text(message.orEmpty(), color = MaterialTheme.colorScheme.primary)
-        }
+        ) { Text(if (isRegister) "Уже есть аккаунт? Войти" else "Нет аккаунта? Зарегистрироваться") }
+
+        if (busy) CircularProgressIndicator()
+        viewModel.message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
 }

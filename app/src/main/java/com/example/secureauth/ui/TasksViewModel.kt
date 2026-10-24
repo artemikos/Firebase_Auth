@@ -1,73 +1,63 @@
 package com.example.secureauth.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import com.example.secureauth.data.TasksRepository
 import com.example.secureauth.model.TaskItem
-import com.google.firebase.firestore.ListenerRegistration
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
+import com.google.android.gms.tasks.Task
+import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 
-class TasksViewModel(private val repository: TasksRepository = TasksRepository()) : ViewModel() {
-    private val _tasks = MutableStateFlow<List<TaskItem>>(emptyList())
-    val tasks: StateFlow<List<TaskItem>> = _tasks.asStateFlow()
-    private val _error = MutableStateFlow<String?>(null)
-    val error: StateFlow<String?> = _error.asStateFlow()
-    private val _busy = MutableStateFlow(false)
-    val busy: StateFlow<Boolean> = _busy.asStateFlow()
+class TasksViewModel : ViewModel() {
+    private val db = FirebaseFirestore.getInstance()
 
-    private var currentUid: String? = null
-    private var registration: ListenerRegistration? = null
+    var error by mutableStateOf<String?>(null)
+        private set
 
-    fun observeUser(uid: String) {
-        if (currentUid == uid && registration != null) return
-        registration?.remove()
-        currentUid = uid
-        _tasks.value = emptyList()
-        _error.value = null
-        registration = repository.listenTasks(
-            uid,
-            onTasksChanged = { _tasks.value = it },
-            onError = { _error.value = it }
-        )
-    }
+    private fun tasks(uid: String) =
+        db.collection("users").document(uid).collection("tasks")
 
-    fun addTask(title: String) {
-        val uid = currentUid ?: return
-        if (title.isBlank() || _busy.value) return
-        perform { repository.addTask(uid, title) }
-    }
-
-    fun toggleTask(task: TaskItem) {
-        val uid = currentUid ?: return
-        perform { repository.setCompleted(uid, task.id, !task.completed) }
-    }
-
-    fun deleteTask(task: TaskItem) {
-        val uid = currentUid ?: return
-        perform { repository.deleteTask(uid, task.id) }
-    }
-
-    private fun perform(action: suspend () -> Unit) {
-        if (_busy.value) return
-        viewModelScope.launch {
-            _busy.value = true
-            _error.value = null
-            try {
-                action()
-            } catch (e: Exception) {
-                _error.value = e.localizedMessage ?: "Не удалось выполнить действие."
-            } finally {
-                _busy.value = false
+    fun observe(uid: String): Flow<List<TaskItem>> = callbackFlow {
+        error = null
+        val registration = tasks(uid)
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .addSnapshotListener { snapshot, e ->
+                if (e != null) {
+                    error = e.localizedMessage
+                } else if (snapshot != null) {
+                    trySend(snapshot.toObjects(TaskItem::class.java))
+                }
             }
-        }
+        awaitClose { registration.remove() }
     }
 
-    override fun onCleared() {
-        registration?.remove()
-        registration = null
-        super.onCleared()
+    fun add(uid: String, title: String) {
+        if (title.isBlank()) return
+        tasks(uid).add(
+            mapOf(
+                "title" to title.trim(),
+                "completed" to false,
+                "ownerUid" to uid,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+        ).report()
+    }
+
+    fun toggle(uid: String, task: TaskItem) {
+        tasks(uid).document(task.id).update("completed", !task.completed).report()
+    }
+
+    fun delete(uid: String, task: TaskItem) {
+        tasks(uid).document(task.id).delete().report()
+    }
+
+    private fun Task<*>.report() {
+        error = null
+        addOnFailureListener { error = it.localizedMessage }
     }
 }
